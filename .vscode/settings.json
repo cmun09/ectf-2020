@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "iosfwd": "c",
+        "regex": "c",
+        "xlocale": "c",
+        "xstring": "c"
+    }
+}

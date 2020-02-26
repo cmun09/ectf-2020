@@ -22,6 +22,8 @@
 #define MEMLIMIT_MAX 0
 #define THREADS_MAX  1
 
+#define OPSLIMIT 10000
+#define MEMLIMIT 0
 //////////////////////// GLOBALS ////////////////////////
 
 
@@ -151,36 +153,36 @@ int username_to_uid(char *username, char *uid, int provisioned_only) {
 
 // loads the song metadata in the shared buffer into the local struct // fixed
 void load_song_md() {
-    s.song_md.md_size = c->song.md.md_size;
-    s.song_md.owner_id = c->song.md.owner_id;
-    s.song_md.num_regions = MIN(MAX(c->song.md.num_regions, 0), NUM_REGIONS);
-    s.song_md.num_users = MIN(MAX(c->song.md.num_users, 0), NUM_USERS);
-    memcpy(s.song_md.rids, (void *)get_drm_rids(c->song), s.song_md.num_regions);
-    memcpy(s.song_md.uids, (void *)get_drm_uids(c->song), s.song_md.num_users);
+    s.md.owner_id = c->drm_song.owner_id;
+    s.md.region_list = c->drm_song.region_list;
+    s.md.preview_length = c->drm_song.preview_length;
+    s.md.audio_length = c->drm_song.audio_length;
+    s.md.pkt1_owner = c->drm_song.pkt1_owner;
+    s.md.owner_key = c->drm_song.owner_key;
+    memcpy(s.md_extended.header_signature, c->drm_song.header_signature, hydro_sign_BYTES);
+    memcpy(s.md_extended.song_signature, c->drm_song.song_signature, hydro_sign_BYTES);
+
+    // s.song_md.num_regions = MIN(MAX(c->song.md.num_regions, 0), NUM_REGIONS);
+    // memcpy(s.song_md.rids, (void *)get_drm_rids(c->song), s.song_md.num_regions);
+    // memcpy(s.song_md.uids, (void *)get_drm_uids(c->song), s.song_md.num_users);
 }
 
 
 // checks if the song loaded into the shared buffer is locked for the current user
 int is_locked() {
     int locked = TRUE;
-
+    int shared = FALSE;
     // check for authorized user
     if (!s.logged_in) {
         mb_printf("No user logged in");
     } else {
-        load_song_md();
 
         // check if user is authorized to play song
-        if (s.uid == s.song_md.owner_id) {
+        if (s.uid == s.md.owner_id) {
             locked = FALSE;
-        } else {
-            for (int i = 0; i < NUM_PROVISIONED_USERS && locked; i++) {
-                if (s.uid == s.song_md.uids[i]) {
-                    locked = FALSE;
-                }
-            }
-        }
-
+        if(s.md.sharee_uids >> (s.md.uid - 1) & 1){ // shift the bit field and check it is set
+            locked = FALSE;
+        }   
         if (locked) {
             mb_printf("User '%s' does not have access to this song", s.username);
             return locked;
@@ -188,17 +190,24 @@ int is_locked() {
         mb_printf("User '%s' has access to this song", s.username);
         locked = TRUE; // reset lock for region check
 
-        // search for region match
-        for (int i = 0; i < s.song_md.num_regions; i++) {
-            for (int j = 0; j < (u8)NUM_PROVISIONED_REGIONS; j++) {
-                if (PROVISIONED_RIDS[j] == s.song_md.rids[i]) {
-                    locked = FALSE;
-                }
+
+        // Check the region bit field and see if there is at least one matching one
+        for (int i = 0; i < sizeof(REGION_IDS); i++){
+            if(!(s.md.region_list >> (REGION_IDS[i]) & 1)){
+                locked = FALSE;
+                shared = TRUE;
+                break;
             }
         }
 
         if (!locked) {
             mb_printf("Region Match. Full Song can be played. Unlocking...");
+            if(shared){ // derive symmetryic key with shared public key  
+
+            }
+            else{ // use the owner's private key to unencrypt song
+                kp = hydro_kx_keypair();
+            }
         } else {
             mb_printf("Invalid region");
         }
@@ -210,6 +219,8 @@ int is_locked() {
 // copy the local song metadata into buf in the correct format
 // returns the size of the metadata in buf (including the metadata size field)
 // song metadata should be loaded before call
+
+// this is used for sharing, however, this is no longer needed
 int gen_song_md(char *buf) {
     buf[0] = ((5 + s.song_md.num_regions + s.song_md.num_users) / 2) * 2; // account for parity
     buf[1] = s.song_md.owner_id;
@@ -217,7 +228,6 @@ int gen_song_md(char *buf) {
     buf[3] = s.song_md.num_users;
     memcpy(buf + 4, s.song_md.rids, s.song_md.num_regions);
     memcpy(buf + 4 + s.song_md.num_regions, s.song_md.uids, s.song_md.num_users);
-
     return buf[0];
 }
 
@@ -229,30 +239,52 @@ int gen_song_md(char *buf) {
 void login() {
     if (s.logged_in) {
         mb_printf("Already logged in. Please log out first.\r\n");
-        //memset( s.username, 0, USERNAME_SZ); // reset s.username
-        //memset(s.pin, 0, MAX_PIN_SZ);   // reset s.pin
     } else {
         memcpy((void*)c->username, s.username, USERNAME_SZ); // make a copy of the username
         memcpy((void*)c->pin, s.pin, MAX_PIN_SZ);   // make a copy of the pin
         for (int i = 0; i < NUM_PROVISIONED_USERS; i++) {
             // search for matching username
             if (!strcmp(s.username, USERNAMES[PROVISIONED_UIDS[i]])) {
+                uint8_t tohash[64 + sizeof(PROVISIONED_USER_SALT1S[i])]; // allocate memory for salted password
+                memcpy(tohash, s.pin, MAX_PIN_SZ);  // copy stored pin
+                memcpy(tohash + 64, PROVISIONED_USER_SALT1S[i], sizeof(PROVISIONED_USER_SALT1S[i]))); // append the salt
+                
 
-
-                // TODO: check if pin matches - compare against the hashed pin
-                //if (!strcmp(s.pin, PROVISIONED_PINS[i])) {
-                if(hydro_pwhash_verify((void *)PROVISIONED_PIN_HASHES[i], s.pin, sizeof(s.pin), (uint8_t *)MASTER_KEY, OPSLIMIT_MAX, MEMLIMIT_MAX, THREADS_MAX) == 0){
-                    //update states
-                    s.logged_in = 1;
-                    c->login_status = 1; // is this needed?
-                    s.uid = PROVISIONED_UIDS[i];
-                    mb_printf("Logged in for user '%s'\r\n", c->username);
-                    return;
-                } else {
+                // verify the hash with the padding + salt
+                if(hydro_pwhash_verify((void *)PROVISIONED_PIN_HASHES[i], tohash, // line1 start
+                  sizeof(tohash), (uint8_t *)MASTER_KEY,  // line 2
+                  OPSLIMIT_MAX, MEMLIMIT_MAX, THREADS_MAX) != 0){ // line 3 end
                     // reject login attempt
-                    mb_printf("Incorrect pin for user '%s'\r\n", c->username);
+                    mb_printf("Incorrect pin for user '%s'\r\n", s.username);
                     memset(s.username, 0, USERNAME_SZ);
                     memset(s.pin, 0, MAX_PIN_SZ);
+                    return;
+                } 
+                else {
+                    // determine the hash to derive private key of user
+                    uint8_t derived_hash1[32];
+                    hydro_pwhash_deterministic(derived_hash1, 
+                    sizeof derived_hash1, 
+                    tohash, sizeof(tohash), CONTEXT, 
+                    (uint8_t *)MASTER_KEY, OPSLIMIT, MEMLIMIT, THREADS_MAX); 
+
+
+                    uint8_t tohash2[64 + sizeof(PROVISIONED_USER_SALT2S[i])]; // allocate memory for salted password
+                    memcpy(tohash2, s.pin, MAX_PIN_SZ);  // copy stored pin
+                    memcpy(tohash2 + 64, PROVISIONED_USER_SALT2S[i], sizeof(PROVISIONED_USER_SALT2S[i]))); // append the salt
+                
+                    uint8_t derived_hash2[hydro_hash_BYTES];
+                    hydro_hash_hash(derived_hash2, sizeof(derived_hash2), tohash2, sizeof(tohash2), CONTEXT, NULL);
+
+                    s.private_key = derived_hash1 ^ derived_hash2;
+                    //update states
+                    s.logged_in = 1;
+                    c->login_status = 1; // probably not needed?
+                    s.uid = PROVISIONED_UIDS[i];
+                    mb_printf("Logged in for user '%s'\r\n", s.username);
+
+                    // determine the private key of the user
+
                     return;
                 }
             }
@@ -327,6 +359,26 @@ void query_song() {
     mb_printf("Queried song (%d regions, %d users)\r\n", c->query.num_regions, c->query.num_users);
 }
 
+// verifies that the drm_md_header has not been tampered
+int verify_drm_md_header(){
+    if (hydro_sign_verify(s.md_extended.header_signature, 
+        s.md, sizeof(s.md), CONTEXT, DEVICE_PK) != 0) {
+    /* forged */
+        return false;
+    }
+    return true;
+}
+
+// verifies that the song has not been tampered
+int verify_song(){
+    if (hydro_sign_verify(s.md_extended.song_signature, 
+        c->drm_song.song_raw, sizeof(s.md), CONTEXT, DEVICE_PK) != 0) {
+    /* forged */
+        return false;
+    }
+    return true;
+}
+
 
 // add a user to the song's list of users
 void share_song() {
@@ -348,6 +400,13 @@ void share_song() {
         c->song.wav_size = 0;
         return;
     }
+    // basic song sharing check finished
+    hydro_kx_session_keypair session_kp;
+
+    hydro_kx_keypair kp = {PROVISIONED_USER_PKS[s.uid], s.private_key};
+    hydro_kx_n_2(*session_kp, PROVISIONED_USER_PKS[s.uid], NULL,);
+
+
 
     // generate new song metadata
     s.song_md.uids[s.song_md.num_users++] = uid;
@@ -374,9 +433,15 @@ void play_song() {
 
     mb_printf("Reading Audio File...");
     load_song_md();
-
+    if(verify_song() && verify_drm_md_header()){
+        mb_printf("Song verification success.");
+    }{
+        // return if the song verification failes using the public key
+        mb_printf("Song with invalid signature. Has the song been tampered?");
+        return;
+    }
     // get WAV length
-    length = c->song.wav_size;
+    length = s.md.preview_length + s.md.audio_length;
     mb_printf("Song length = %dB", length);
 
     // truncate song if locked

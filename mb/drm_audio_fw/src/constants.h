@@ -52,55 +52,56 @@ typedef struct {
 #define q_region_lookup(q, i) (q.regions + (i * REGION_NAME_SZ))
 #define q_user_lookup(q, i) (q.users + (i * USERNAME_SZ))
 
-
-typedef struct __attribute__((__packed__)){
-    char name[16];
-    char key[16];
-} shared_key;
-
-// struct to interpret drm metadata
-typedef struct __attribute__((__packed__)) {
-    char md_size;
-    char owner_id;
-    char num_regions;
-    char num_users;
-    char buf[];
-} drm_md;
-
-// struct to interpret drm metadata
-typedef struct __attribute__((__packed__)) {
-    char song_name[256];
-    char owner_name[16];
-    int  region_list;
-    char signature[32];
-    unsigned int audio_length;
-    unsigned int preview_length;
-    shared_key shared_keys[64];
-    char song_data[];
-} drm_md_better;
-
-
-
-// struct to interpret shared buffer as a drm song file
-// packing values skip over non-relevant WAV metadata
-typedef struct __attribute__((__packed__)) {
-    char packing1[4];
-    u32 file_size;
-    char packing2[32];
-    u32 wav_size;
-    drm_md md;
-} song;
-
 // accessors for variable-length metadata fields
 #define get_drm_rids(d) (d.md.buf)
 #define get_drm_uids(d) (d.md.buf + d.md.num_regions)
 #define get_drm_song(d) ((char *)(&d.md) + d.md.md_size)
 
-
 // shared buffer values
 enum commands { QUERY_PLAYER, QUERY_SONG, LOGIN, LOGOUT, SHARE, PLAY, STOP, DIGITAL_OUT, PAUSE, RESTART, FF, RW };
 enum states   { STOPPED, WORKING, PLAYING, PAUSED };
 
+
+typedef struct __attribute__((__packed__)){
+    uint8_t pkt[48];
+} pkt;
+
+typedef struct __attribute__((__packed__)){
+    uint8_t sym_key[68];
+} sym_key;
+
+// struct to interpret drm metadata
+typedef struct __attribute__((__packed__)) {
+    uint8_t owner_id;
+    uint32_t region_list;
+    uint32_t preview_length;
+    uint32_t audio_length;
+    pkt pkt1_owner;
+    sym_key owner_key;
+    uint8_t header_signature[hydro_sign_BYTES];
+    uint64_t sharee_uids;
+    pkt sharees[64];
+    sym_key sharee_keys[64];
+    uint8_t song_signature[hydro_sign_BYTES]
+    uint8_t song_raw[]; 
+} drm_file;
+
+typedef struct __attribute__((__packed__)){
+    uint8_t owner_id;
+    uint32_t region_list;
+    uint32_t preview_length;
+    uint32_t audio_length;
+    pkt pkt1_owner;
+    sym_key owner_key;
+}drm_md_header;
+
+typedef struct __attribute__(){
+    uint8_t header_signature[hydro_sign_BYTES];
+    uint64_t sharee_uids;
+    pkt sharees[64];
+    sym_key sharee_keys[64];
+    uint8_t song_signature[hydro_sign_BYTES]
+}drm_md_header_extended;
 
 // struct to interpret shared command channel
 typedef volatile struct __attribute__((__packed__)) {
@@ -113,30 +114,21 @@ typedef volatile struct __attribute__((__packed__)) {
 
     // shared buffer is either a drm song or a query
     union {
-        song song;
-        query query;
+        drm_file drm_song;
+        query  query;
     };
 } cmd_channel;
 
 
-// local store for drm metadata
-typedef struct {
-    u8 md_size;
-    u8 owner_id;
-    u8 num_regions;
-    u8 rids[MAX_REGIONS];
-    u8 num_users;
-    u8 uids[MAX_USERS];
-} song_md;
-
-
 // store of internal state
 typedef struct {
-    char logged_in;             // whether or not a user is logged on
-    u8 uid;                     // logged on user id
+    uint8_t logged_in = 0;             // whether or not a user is logged on
+    uint8_t uid = 0;                   // logged on user id
     char username[USERNAME_SZ]; // logged on username
     char pin[MAX_PIN_SZ];       // logged on pin
-    song_md song_md;            // current song metadata
+    uint8_t private_key[hydro_hash_BYTES]; // double check on this
+    drm_md_header md;           // current song header data
+    drm_md_header_extended md_extended;
 } internal_state;
 
 

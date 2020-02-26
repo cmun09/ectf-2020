@@ -42,25 +42,16 @@ typedef struct {
 #define q_user_lookup(q, i) (q.users + (i * USERNAME_SZ))
 
 
-// struct to interpret drm metadata
 typedef struct __attribute__((__packed__)) {
-    char md_size;
-    char owner_id;
-    char num_regions;
-    char num_users;
-    char buf[];
-} drm_md;
-
-
-// struct to interpret shared buffer as a drm song file
-// packing values skip over non-relevant WAV metadata
-typedef struct __attribute__((__packed__)) {
-    char packing1[4];
-    int file_size;
-    char packing2[32];
-    int wav_size;
-    drm_md md;
-} song;
+    char song_name[256];
+    char owner_name[16];
+    int  region_list;
+    char signature[hydro_sign_BYTES];
+    unsigned int wav_size;
+    unsigned int preview_length;
+    shared_key shared_keys[64];
+    u8 encrypted_song[];
+} drm_file;
 
 // accessors for variable-length metadata fields
 #define get_drm_rids(d) (d.md.buf)
@@ -84,8 +75,8 @@ typedef volatile struct __attribute__((__packed__)) {
 
     // shared buffer is either a drm song or a query
     union {
-        song song;
-        query query;
+        drm_file _song; // so this part isn't just the song, its the whole DRM song
+        query _query;
         char buf[MAX_SONG_SZ]; // sets correct size of cmd_channel for allocation
     };
 } cmd_channel;
